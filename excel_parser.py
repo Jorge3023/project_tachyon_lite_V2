@@ -116,16 +116,16 @@ def _sheet_exists(wb, name: str) -> bool:
 
 
 def _build_header_map(ws, header_row: int) -> Dict[str, int]:
-    """Mapa nombre de columna (case-insensitive) -> índice de columna (1-indexado)."""
     header_map: Dict[str, int] = {}
-    max_col = ws.max_column or 1
-    for c in range(1, max_col + 1):
-        val = ws.cell(row=header_row, column=c).value
-        name = _norm(val)
-        if name:
-            key = name.lower()
-            if key not in header_map:
-                header_map[key] = c
+    # Leemos solo la fila de encabezados
+    for row in ws.iter_rows(min_row=header_row, max_row=header_row, values_only=True):
+        for idx, val in enumerate(row):
+            name = _norm(val)
+            if name:
+                key = name.lower()
+                if key not in header_map:
+                    header_map[key] = idx # Guardamos el índice (0, 1, 2...)
+        break # Solo necesitamos la primera fila
     return header_map
 
 
@@ -204,41 +204,33 @@ def procesar_archivo(contenido: bytes, nombre: str) -> Dict[str, Any]:
             else:
                 lookup_name = ALIAS_MAP.get(key, target_name)
                 src_col_for.append(header_map.get(lookup_name.lower()))
-
+        
         filas_leidas = 0
         filas_validas = 0
 
-        for r in range(DATA_START_ROW, last_row + 1):
+        # En lugar de iterar por rango numérico, iteramos secuencialmente obteniendo las tuplas
+        for row_values in ws.iter_rows(min_row=DATA_START_ROW, values_only=True):
             filas_leidas += 1
 
-            month_col = src_col_for[idx_month]
-            month_raw = ws.cell(row=r, column=month_col).value if month_col else None
+            # Si toda la fila está vacía (equivalente a tu revisión anterior o al final del archivo)
+            if all(v in (None, "") for v in row_values):
+                continue
+
+            month_col_idx = src_col_for[idx_month]
+            month_raw = row_values[month_col_idx] if month_col_idx is not None and month_col_idx < len(row_values) else None
 
             yr, mo = _parse_year_month(month_raw)
             if yr == 0:
                 filas_omitidas_sin_fecha += 1
                 continue
 
-            # Verifica si la fila está completamente vacía en TODAS las columnas mapeadas
-            row_blank = True
-            row_values_cache: Dict[int, Any] = {}
-            for col in src_col_for:
-                if col:
-                    v = ws.cell(row=r, column=col).value
-                    row_values_cache[col] = v
-                    if v not in (None, "") and str(v).strip() != "":
-                        row_blank = False
-            if row_blank:
-                continue
-
-            sap_rms = _safe_num(
-                row_values_cache.get(src_col_for[idx_sap_rms])
-                if src_col_for[idx_sap_rms] else None
-            )
-            sap_rev = _safe_num(
-                row_values_cache.get(src_col_for[idx_sap_rev])
-                if src_col_for[idx_sap_rev] else None
-            )
+            # Extraemos SAP RMS y SAP REV usando los índices
+            idx_rms_src = src_col_for[idx_sap_rms]
+            idx_rev_src = src_col_for[idx_sap_rev]
+            
+            sap_rms = _safe_num(row_values[idx_rms_src] if idx_rms_src is not None and idx_rms_src < len(row_values) else None)
+            sap_rev = _safe_num(row_values[idx_rev_src] if idx_rev_src is not None and idx_rev_src < len(row_values) else None)
+            
             rms_val = sap_rms * -1
             revenue_val = sap_rev * -1
             year_month_txt = f"{yr}-{mo:02d}"
@@ -259,8 +251,13 @@ def procesar_archivo(contenido: bytes, nombre: str) -> Dict[str, Any]:
                 elif key == "status":
                     fila_out.append(status_val)
                 else:
-                    col = src_col_for[i]
-                    fila_out.append(row_values_cache.get(col, ws.cell(row=r, column=col).value) if col else None)
+                    col_idx = src_col_for[i]
+                    # Validamos que el índice exista y no supere la longitud de la fila devuelta
+                    if col_idx is not None and col_idx < len(row_values):
+                        val = row_values[col_idx]
+                        fila_out.append(val)
+                    else:
+                        fila_out.append(None)
 
             filas_salida.append(fila_out)
             filas_validas += 1
