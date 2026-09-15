@@ -1,250 +1,223 @@
-/* ── Sesión ──────────────────────────────────────────────────────────────── */
-const SESSION_KEY      = 'tachyon_session'
-const SESSION_MINUTES  = 15
-const EXTENSIONES_OK   = /\.(csv|xlsx|xls)$/i
-let countdownInterval  = null
+let accessKey = null;
+let archivoSeleccionado = null;
+let sessionTimeout = null;
+let sessionInterval = null;
+let sessionExpiresAt = null;
 
-function getSession() {
-  try {
-    const raw = sessionStorage.getItem(SESSION_KEY)
-    if (!raw) return null
-    const s = JSON.parse(raw)
-    if (Date.now() > s.expires) { sessionStorage.removeItem(SESSION_KEY); return null }
-    return s
-  } catch { return null }
+const SESSION_MINUTES = 15;
+
+// ── Login ────────────────────────────────────────────────────────────────
+function toggleKey() {
+  const input = document.getElementById("accessKey");
+  input.type = input.type === "password" ? "text" : "password";
 }
 
-function setSession(key) {
-  const s = { key, expires: Date.now() + SESSION_MINUTES * 60 * 1000 }
-  sessionStorage.setItem(SESSION_KEY, JSON.stringify(s))
+async function doLogin() {
+  const key = document.getElementById("accessKey").value.trim();
+  const err = document.getElementById("loginError");
+  const btnText = document.getElementById("loginBtnText");
+  const spinner = document.getElementById("loginSpinner");
+
+  err.classList.remove("show");
+  if (!key) {
+    err.textContent = "Ingresa una clave";
+    err.classList.add("show");
+    return;
+  }
+
+  btnText.textContent = "Verificando...";
+  spinner.classList.add("show");
+
+  try {
+    const fd = new FormData();
+    fd.append("key", key);
+    const res = await fetch("/verificar-clave", { method: "POST", body: fd });
+    const data = await res.json();
+
+    if (res.ok && data.ok) {
+      accessKey = key;
+      document.getElementById("loginOverlay").style.display = "none";
+      iniciarSesion();
+    } else {
+      err.textContent = "Clave de acceso incorrecta";
+      err.classList.add("show");
+    }
+  } catch (e) {
+    err.textContent = "No se pudo conectar con el servidor";
+    err.classList.add("show");
+  } finally {
+    btnText.textContent = "Entrar";
+    spinner.classList.remove("show");
+  }
+}
+
+function iniciarSesion() {
+  document.getElementById("sessionBadge").style.display = "flex";
+  resetSessionTimer();
+  ["click", "keydown", "mousemove"].forEach((ev) =>
+    document.addEventListener(ev, resetSessionTimer)
+  );
 }
 
 function resetSessionTimer() {
-  const s = getSession()
-  if (!s) return
-  setSession(s.key)
-  startCountdown()
-}
+  clearTimeout(sessionTimeout);
+  clearInterval(sessionInterval);
+  sessionExpiresAt = Date.now() + SESSION_MINUTES * 60 * 1000;
 
-function startCountdown() {
-  clearInterval(countdownInterval)
-  countdownInterval = setInterval(() => {
-    const s = getSession()
-    if (!s) { logout(); return }
-    const mins = Math.floor((s.expires - Date.now()) / 60000)
-    const secs = Math.floor(((s.expires - Date.now()) % 60000) / 1000)
-    const el = document.getElementById('sessionTimer')
-    if (el) el.textContent = `Sesión: ${mins}:${secs.toString().padStart(2, '0')}`
-    if (Date.now() >= s.expires) logout()
-  }, 1000)
-}
+  sessionInterval = setInterval(() => {
+    const remaining = Math.max(0, sessionExpiresAt - Date.now());
+    const mins = Math.floor(remaining / 60000);
+    const secs = Math.floor((remaining % 60000) / 1000);
+    document.getElementById("sessionTimer").textContent =
+      `${mins}:${secs.toString().padStart(2, "0")}`;
+  }, 1000);
 
-;['click', 'keydown', 'mousemove', 'touchstart'].forEach(ev =>
-  document.addEventListener(ev, () => { if (getSession()) resetSessionTimer() }, { passive: true })
-)
-
-/* ── Login ───────────────────────────────────────────────────────────────── */
-async function doLogin() {
-  const keyInput = document.getElementById('accessKey')
-  const key      = keyInput.value.trim()
-  if (!key) return
-
-  const btn     = document.getElementById('btnLogin')
-  const spinner = document.getElementById('loginSpinner')
-  const btnText = document.getElementById('loginBtnText')
-  const errEl   = document.getElementById('loginError')
-
-  btn.disabled            = true
-  spinner.style.display   = 'block'
-  btnText.textContent     = 'Verificando…'
-  errEl.classList.remove('show')
-
-  try {
-    const fd = new FormData()
-    fd.append('key', key)
-
-    const res  = await fetch('/verificar-clave', { method: 'POST', body: fd })
-    const data = await res.json()
-
-    if (!res.ok || !data.ok) {
-      errEl.classList.add('show')
-      keyInput.value = ''
-      keyInput.focus()
-      return
-    }
-
-    setSession(key)
-    document.getElementById('loginOverlay').classList.add('hidden')
-    document.getElementById('sessionBadge').style.display = 'flex'
-    startCountdown()
-
-  } catch {
-    errEl.textContent = 'No se pudo conectar con el servidor'
-    errEl.classList.add('show')
-  } finally {
-    btn.disabled            = false
-    spinner.style.display   = 'none'
-    btnText.textContent     = 'Entrar'
-  }
+  sessionTimeout = setTimeout(logout, SESSION_MINUTES * 60 * 1000);
 }
 
 function logout() {
-  clearInterval(countdownInterval)
-  sessionStorage.removeItem(SESSION_KEY)
-  document.getElementById('loginOverlay').classList.remove('hidden')
-  document.getElementById('sessionBadge').style.display = 'none'
-  document.getElementById('accessKey').value = ''
-  nuevo(true)
+  accessKey = null;
+  clearTimeout(sessionTimeout);
+  clearInterval(sessionInterval);
+  document.getElementById("sessionBadge").style.display = "none";
+  document.getElementById("loginOverlay").style.display = "flex";
+  document.getElementById("accessKey").value = "";
+  nuevo();
 }
 
-function toggleKey() {
-  const inp = document.getElementById('accessKey')
-  inp.type  = inp.type === 'password' ? 'text' : 'password'
-}
+// ── Selección de archivo ─────────────────────────────────────────────────
+const dropzone = document.getElementById("dropzone");
 
-/* ── Init ────────────────────────────────────────────────────────────────── */
-;(function init() {
-  const s = getSession()
-  if (s) {
-    document.getElementById('loginOverlay').classList.add('hidden')
-    document.getElementById('sessionBadge').style.display = 'flex'
-    startCountdown()
+dropzone.addEventListener("dragover", (e) => {
+  e.preventDefault();
+  dropzone.style.borderColor = "var(--blue)";
+});
+dropzone.addEventListener("dragleave", () => {
+  dropzone.style.borderColor = "";
+});
+dropzone.addEventListener("drop", (e) => {
+  e.preventDefault();
+  dropzone.style.borderColor = "";
+  if (e.dataTransfer.files.length) {
+    document.getElementById("fileInput").files = e.dataTransfer.files;
+    onFileChange({ target: { files: e.dataTransfer.files } });
   }
-})()
+});
 
-/* ── Drag & drop ─────────────────────────────────────────────────────────── */
-let archivoActual = null
+function onFileChange(event) {
+  const file = event.target.files[0];
+  ocultarAlerta();
+  if (!file) return;
 
-const dz = document.getElementById('dropzone')
-dz.addEventListener('dragover',  e => { e.preventDefault(); dz.classList.add('drag') })
-dz.addEventListener('dragleave', () => dz.classList.remove('drag'))
-dz.addEventListener('drop', e => {
-  e.preventDefault(); dz.classList.remove('drag')
-  const file = e.dataTransfer.files[0]
-  if (file) setArchivo(file)
-})
-
-function onFileChange(e) {
-  const file = e.target.files[0]
-  if (file) setArchivo(file)
-}
-
-function setArchivo(file) {
-  if (!EXTENSIONES_OK.test(file.name)) {
-    mostrarAlerta('Solo se aceptan archivos .csv, .xlsx o .xls', 'error'); return
+  const nombreOk = /\.(xlsx|xlsm|xls)$/i.test(file.name);
+  if (!nombreOk) {
+    mostrarAlerta("Solo se aceptan archivos .xlsx, .xlsm o .xls");
+    return;
   }
-  archivoActual = file
-  document.getElementById('fileName').textContent = file.name
-  document.getElementById('fileSelected').classList.add('show')
-  ocultarAlerta()
-  actualizarBoton()
+
+  archivoSeleccionado = file;
+  document.getElementById("fileName").textContent = file.name;
+  document.getElementById("fileSelected").classList.add("show");
+
+  const btn = document.getElementById("btnProcesar");
+  btn.disabled = false;
+  document.getElementById("btnText").textContent = "Generar SilverV2";
 }
 
 function quitarArchivo() {
-  archivoActual = null
-  document.getElementById('fileSelected').classList.remove('show')
-  document.getElementById('fileInput').value = ''
-  actualizarBoton()
+  archivoSeleccionado = null;
+  document.getElementById("fileInput").value = "";
+  document.getElementById("fileSelected").classList.remove("show");
+  document.getElementById("btnProcesar").disabled = true;
+  document.getElementById("btnText").textContent = "Selecciona un archivo para continuar";
 }
 
-function actualizarBoton() {
-  const btn = document.getElementById('btnProcesar')
-  const txt = document.getElementById('btnText')
-  btn.disabled    = !archivoActual
-  txt.textContent = archivoActual ? 'Analizar archivo' : 'Selecciona un archivo para continuar'
-}
-
-/* ── Alertas ─────────────────────────────────────────────────────────────── */
-function mostrarAlerta(msg, tipo = 'error') {
-  const el = document.getElementById('alerta')
-  el.className = `alert show ${tipo}`
-  document.getElementById('alertaMsg').textContent = msg
+function mostrarAlerta(msg) {
+  document.getElementById("alertaMsg").textContent = msg;
+  document.getElementById("alerta").classList.add("show");
 }
 function ocultarAlerta() {
-  document.getElementById('alerta').classList.remove('show')
+  document.getElementById("alerta").classList.remove("show");
 }
 
-/* ── Procesar ────────────────────────────────────────────────────────────── */
+// ── Procesar ─────────────────────────────────────────────────────────────
 async function procesar() {
-  const s = getSession()
-  if (!s) { logout(); return }
-  if (!archivoActual) { mostrarAlerta('Selecciona un archivo'); return }
+  if (!archivoSeleccionado || !accessKey) return;
 
-  const btn     = document.getElementById('btnProcesar')
-  const spinner = document.getElementById('spinner')
-  const btnText = document.getElementById('btnText')
+  const btn = document.getElementById("btnProcesar");
+  const btnText = document.getElementById("btnText");
+  const spinner = document.getElementById("spinner");
 
-  btn.disabled            = true
-  spinner.style.display   = 'block'
-  btnText.textContent     = 'Procesando…'
-  ocultarAlerta()
-
-  const form = new FormData()
-  form.append('key',  s.key)
-  form.append('file', archivoActual)
+  ocultarAlerta();
+  btn.disabled = true;
+  spinner.classList.add("show");
+  btnText.textContent = "Procesando...";
 
   try {
-    const res  = await fetch('/procesar', { method: 'POST', body: form })
-    const data = await res.json()
+    const fd = new FormData();
+    fd.append("key", accessKey);
+    fd.append("file", archivoSeleccionado);
+
+    const res = await fetch("/procesar", { method: "POST", body: fd });
+    const data = await res.json();
 
     if (!res.ok) {
-      if (res.status === 401) { logout(); return }
-      mostrarAlerta(data.error || 'Error al procesar el archivo', 'error')
-      return
+      mostrarAlerta(data.error || "Ocurrió un error al procesar el archivo");
+      btn.disabled = false;
+      return;
     }
 
-    resetSessionTimer()
-    mostrarResultado(data.resumen, archivoActual.name)
-
-  } catch {
-    mostrarAlerta('No se pudo conectar con el servidor. Verifica tu conexión.', 'error')
+    mostrarResultado(data.resumen, archivoSeleccionado.name);
+  } catch (e) {
+    mostrarAlerta("No se pudo conectar con el servidor");
+    btn.disabled = false;
   } finally {
-    btn.disabled            = false
-    spinner.style.display   = 'none'
-    btnText.textContent     = archivoActual ? 'Analizar archivo' : 'Selecciona un archivo para continuar'
+    spinner.classList.remove("show");
+    btnText.textContent = "Generar SilverV2";
   }
 }
 
-/* ── Resultado ───────────────────────────────────────────────────────────── */
-function mostrarResultado(r, nombre) {
-  document.getElementById('resNombre').textContent   = nombre
-  document.getElementById('mRegistros').textContent  = r.total_registros?.toLocaleString('es-MX')  ?? '—'
-  document.getElementById('mModelos').textContent    = r.total_modelos?.toLocaleString('es-MX')     ?? '—'
-  document.getElementById('mPiezas').textContent     = r.total_piezas?.toLocaleString('es-MX')      ?? '—'
-  document.getElementById('mHoras').textContent       = (r.horas_trabajadas ?? '—') + 'h'
+function mostrarResultado(resumen, nombreArchivo) {
+  document.getElementById("cardUpload").style.display = "none";
+  document.getElementById("resultado").style.display = "block";
 
-  const tags = document.getElementById('resTags')
-  tags.innerHTML = ''
-  const addTag = (txt, azul) => {
-    const t = document.createElement('span')
-    t.className   = 'tag' + (azul ? ' blue' : '')
-    t.textContent = txt
-    tags.appendChild(t)
+  document.getElementById("resNombre").textContent = `— ${nombreArchivo}`;
+  document.getElementById("mFilas").textContent = resumen.filas_totales ?? "—";
+  document.getElementById("mColumnas").textContent = resumen.columnas ?? "—";
+  document.getElementById("mHojas").textContent =
+    (resumen.hojas_encontradas || []).length;
+
+  const desde = resumen.rango_year_month?.desde || "—";
+  const hasta = resumen.rango_year_month?.hasta || "—";
+  document.getElementById("mRango").textContent = `${desde} → ${hasta}`;
+
+  document.getElementById("mOmitidas").textContent =
+    resumen.filas_omitidas_sin_fecha ?? "0";
+
+  const tags = document.getElementById("resTags");
+  tags.innerHTML = "";
+  const porStatus = resumen.por_status || {};
+  Object.entries(porStatus).forEach(([status, cantidad]) => {
+    const tag = document.createElement("span");
+    tag.className = "tag";
+    tag.textContent = `${status}: ${cantidad}`;
+    tags.appendChild(tag);
+  });
+  if (resumen.hojas_ignoradas && resumen.hojas_ignoradas.length) {
+    const tag = document.createElement("span");
+    tag.className = "tag";
+    tag.textContent = `Hojas no encontradas: ${resumen.hojas_ignoradas.join(", ")}`;
+    tags.appendChild(tag);
   }
-  r.rango_fechas?.forEach(f => addTag(f, true))
-
-  document.getElementById('resultado').classList.add('show')
-  document.getElementById('resultado').scrollIntoView({ behavior: 'smooth', block: 'start' })
 }
 
-/* ── Descargar ───────────────────────────────────────────────────────────── */
-function descargar() {
-  const s = getSession()
-  if (!s) { logout(); return }
-  const a = document.createElement('a')
-  a.href  = '/descargar'
-  a.click()
-  resetSessionTimer()
+async function descargar() {
+  window.location.href = "/descargar";
 }
 
-/* ── Nuevo ───────────────────────────────────────────────────────────────── */
-function nuevo(silencioso = false) {
-  archivoActual = null
-  document.getElementById('fileSelected').classList.remove('show')
-  document.getElementById('fileInput').value = ''
-  document.getElementById('resultado').classList.remove('show')
-  document.getElementById('resTags').innerHTML = ''
-  ocultarAlerta()
-  actualizarBoton()
-  if (!silencioso) window.scrollTo({ top: 0, behavior: 'smooth' })
+function nuevo() {
+  document.getElementById("resultado").style.display = "none";
+  document.getElementById("cardUpload").style.display = "block";
+  quitarArchivo();
+  ocultarAlerta();
 }

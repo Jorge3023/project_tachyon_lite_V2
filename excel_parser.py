@@ -1,394 +1,322 @@
-"""
-Parser de reportes de producción — Project Tachyon Lite.
+from __future__ import annotations
 
-Reglas de negocio:
-  - El modelo se obtiene EXCLUSIVAMENTE de la columna "Job".
-  - El modelo aparece una sola vez al inicio de cada bloque; las filas
-    siguientes (sin valor en Job) pertenecen a ese mismo modelo hasta
-    que aparece un nuevo valor en Job.
-  - El valor de "Panel" en la fila donde aparece el modelo (ej. "182")
-    es el conteo ACUMULADO de turnos/horas previas al archivo actual.
-    NO se usa para ningún cálculo y tampoco representa una pieza nueva.
-  - La PRIMERA fila de cada bloque (la que contiene el valor en Job) es
-    solo metadata del acumulado anterior — NO cuenta como pieza producida.
-    El conteo de piezas reales empieza desde la SEGUNDA fila del bloque.
-  - Cada fila de producción (a partir de la segunda del bloque) = 1 pieza,
-    sin importar el valor de Panel (no se usa último-primero+1).
-  - La fecha/hora se obtiene EXCLUSIVAMENTE de "End time"
-    (formato esperado: "06/06/2026 09:44:14 a. m.").
-  - El "End time" de la primera fila del bloque SÍ sigue siendo válido
-    como referencia temporal, aunque esa fila no cuente como pieza.
-  - Columnas ignoradas por completo: Time(s), EndTo1st, EndTo1stEnd,
-    EndTo2nd, EndTo2ndEnd, EndTo3rd, EndTo3rdEnd.
-  - Tiempo trabajado de un modelo = desde la ÚLTIMA fila (por End time)
-    del modelo ANTERIOR hasta la ÚLTIMA fila del modelo ACTUAL.
-  - Para el PRIMER modelo del archivo: el tiempo trabajado inicia a las
-    7:00 AM del día de su última fila (inicio de turno), no en su
-    primera pieza real.
-"""
-
-import pandas as pd
-import numpy as np
 import io
 import re
-from datetime import datetime, time
+import datetime
+from typing import Any, Dict, List, Optional, Tuple
 
+from openpyxl import load_workbook, Workbook
+from openpyxl.utils import get_column_letter
 
-# ── Columnas que deben ignorarse explícitamente ───────────────────────────────
-COLUMNAS_IGNORADAS = {
-    "time(s)", "endto1st", "endto1stend",
-    "endto2nd", "endto2ndend", "endto3rd", "endto3rdend",
+# 
+#  CONFIGURACION (equivalente a las constantes de la macro)
+# 
+
+SHEET_GRS = "GR'S"
+SHEET_RM = "GRS (RM)"
+SHEET_SQ00 = "SQ00"
+SHEET_OUT = "SilverV2"
+
+HEADER_ROW = 2          # fila de encabezados (1-indexado, igual que en Excel/VBA)
+DATA_START_ROW = 3      # primera fila de datos
+
+# Hojas fuente -> Status que se le asigna a cada una en la columna calculada "Status"
+SOURCES: List[Tuple[str, str]] = [
+    (SHEET_GRS, "GR"),
+    (SHEET_RM, "GR"),
+    (SHEET_SQ00, "OPO"),
+]
+
+# Encabezados de salida  EXACTAMENTE en este orden (igual que TargetHeaders() en VBA)
+TARGET_HEADERS: List[str] = [
+    "Unloading Point", "Customer name", "UNIQUE#", "MONTH", "Qtr", "PO Number",
+    "Warning", "SO PRICE", "Vendor#", "Vendor Name", "Material#", "Quantity",
+    "Price", "PO PRICE", "Per", "Delivery date", "SAP MTLS", "SAP REV", "SAP RMS",
+    "GR Document", "TYPE", "REGION", "SITE", "Program", "PriceC", "ComCode",
+    "Commodity", "Segment", "CC", "Cust Refresh", "P/n to be acct", "Customer Bought",
+    "Customer Sold", "CEL P/N Bought", "CEL P/N Sold", "TRADER", "ROB NEW DEAL",
+    "SPLIT PERCENT", "% RES", "HB months", "REP. MTLS", "REP. RMS", "RESERVES",
+    "Region Indefinite", "RELEASE IN/FROM", "comments", "From (+) To (-) Reserves",
+    "Splits (Regional (Site)) From original transaction", "SO Currency", "PO Currency",
+    "Comments", "SO-CPN", "CC_1", "Sales Order", "Remarks", "MPN", "MFG",
+    "Segment_2", "TAG", "SO Price", "Delta", "Status", "GR Date", "Category",
+    "Month.", "RMS", "Year", "revenue", "Year-Month",
+]
+
+# Alias: nombre destino -> nombre real de la columna en el archivo origen
+ALIAS_MAP: Dict[str, str] = {
+    "quantity": "GR Quantity",
 }
 
-HORA_INICIO_TURNO = time(7, 0, 0)   # 7:00 AM
+# Columnas que NUNCA se leen del origen: se calculan fila por fila
+COMPUTED_COLS = {
+    "month.", "rms", "year", "revenue", "year-month", "status",
+}
+
+_MONTH_STR_RE = re.compile(r"^(\d{4})\s+(\d{1,2})")
+_EXCEL_EPOCH = datetime.datetime(1899, 12, 30)
 
 
-# ── Lectura del archivo (csv, xlsx, xls) ──────────────────────────────────────
+# 
+#  HELPERS
+# 
 
-def leer_archivo(file_bytes: bytes, filename: str) -> pd.DataFrame:
-    """Lee CSV o Excel, detectando el formato por extensión y por contenido."""
-    nombre = (filename or "").lower()
-    buffer = io.BytesIO(file_bytes)
-    errores = []
+def _norm(s: Any) -> str:
+    return str(s).strip() if s is not None else ""
 
-    # ── CSV ──
-    if nombre.endswith(".csv"):
-        for sep in (",", ";", "\t"):
-            for enc in ("utf-8-sig", "utf-8", "latin-1"):
-                try:
-                    buffer.seek(0)
-                    df = pd.read_csv(buffer, sep=sep, encoding=enc, engine="python")
-                    if df.shape[1] > 1:        # separador correcto si hay >1 columna
-                        df.columns = [str(c).strip() for c in df.columns]
-                        return df
-                except Exception as exc:
-                    errores.append(f"csv(sep={sep!r},enc={enc}): {exc}")
+
+def _safe_num(v: Any) -> float:
+    """Igual que SafeNum en VBA: si no es numérico, regresa 0."""
+    if v is None:
+        return 0.0
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        return float(v)
+    try:
+        return float(str(v).strip().replace(",", ""))
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def _parse_year_month(raw: Any) -> Tuple[int, int]:
+    """Igual que ParseYearMonth en VBA: intenta extraer (año, mes) de la columna MONTH."""
+    if raw is None:
+        return 0, 0
+
+    if isinstance(raw, datetime.datetime):
+        return raw.year, raw.month
+    if isinstance(raw, datetime.date):
+        return raw.year, raw.month
+
+    # Números "sueltos" (sin formato de fecha) — VBA los trata como fecha serial
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        try:
+            dt = _EXCEL_EPOCH + datetime.timedelta(days=float(raw))
+            if 1900 <= dt.year <= 2100:
+                return dt.year, dt.month
+        except (OverflowError, ValueError):
+            pass
+        return 0, 0
+
+    s = _norm(raw)
+    if not s:
+        return 0, 0
+
+    m = _MONTH_STR_RE.match(s)
+    if m:
+        yr = int(m.group(1))
+        mo = int(m.group(2))
+        if 1 <= mo <= 12:
+            return yr, mo
+
+    return 0, 0
+
+
+def _sheet_exists(wb, name: str) -> bool:
+    return name in wb.sheetnames
+
+
+def _build_header_map(ws, header_row: int) -> Dict[str, int]:
+    """Mapa nombre de columna (case-insensitive) -> índice de columna (1-indexado)."""
+    header_map: Dict[str, int] = {}
+    max_col = ws.max_column or 1
+    for c in range(1, max_col + 1):
+        val = ws.cell(row=header_row, column=c).value
+        name = _norm(val)
+        if name:
+            key = name.lower()
+            if key not in header_map:
+                header_map[key] = c
+    return header_map
+
+
+def _find_last_row_with_data(ws, data_start_row: int) -> int:
+    """Última fila con al menos un dato, buscando desde abajo hacia arriba (más
+    robusto que solo mirar la columna A, por si esa columna viene vacía)."""
+    max_row = ws.max_row or (data_start_row - 1)
+    for r in range(max_row, data_start_row - 1, -1):
+        for c in range(1, (ws.max_column or 1) + 1):
+            if ws.cell(row=r, column=c).value not in (None, ""):
+                return r
+    return data_start_row - 1  # sin datos
+
+
+# 
+#  PROCESO PRINCIPAL
+# 
+
+def procesar_archivo(contenido: bytes, nombre: str) -> Dict[str, Any]:
+    """
+    Recibe los bytes del archivo Excel subido y regresa:
+        {
+          "resumen": {...},       # métricas para mostrar en la UI
+          "excel_out": bytes,     # archivo .xlsx final (hoja SilverV2)
+        }
+    Lanza ValueError con un mensaje claro si no se encuentra NINGUNA de las
+    hojas esperadas.
+    """
+    if not nombre.lower().endswith((".xlsx", ".xls", ".xlsm")):
         raise ValueError(
-            "No se pudo leer el archivo CSV. Verifica el delimitador y codificación. "
-            f"Detalle: {' | '.join(errores[:3])}"
+            "El proceso Silver requiere un archivo Excel (.xlsx/.xlsm) que contenga "
+            "las hojas \"GR'S\", \"GRS (RM)\" y/o \"SQ00\"."
         )
 
-    # ── Excel (.xlsx / .xls) ──
-    for engine in (None, "openpyxl", "xlrd"):
-        try:
-            buffer.seek(0)
-            xl = pd.ExcelFile(buffer, engine=engine) if engine else pd.ExcelFile(buffer)
-            df = xl.parse(xl.sheet_names[0], header=0)
+    try:
+        wb = load_workbook(io.BytesIO(contenido), data_only=True, read_only=True)
+    except Exception as e:
+        raise ValueError(f"No se pudo abrir el archivo Excel: {e}")
 
-            # Deduplicar nombres de columnas repetidos
-            cols, seen = [], {}
-            for c in df.columns:
-                c = str(c).strip()
-                seen[c] = seen.get(c, 0)
-                cols.append(c if seen[c] == 0 else f"{c}__dup{seen[c]}")
-                seen[c] += 1
-            df.columns = cols
-            return df
+    hojas_encontradas = [s for s, _ in SOURCES if _sheet_exists(wb, s)]
+    if not hojas_encontradas:
+        raise ValueError(
+            "No se encontró ninguna de las hojas requeridas: "
+            "\"GR'S\", \"GRS (RM)\", \"SQ00\". Verifica que no hayan sido renombradas."
+        )
 
-        except Exception as exc:
-            errores.append(f"{engine or 'auto'}: {exc}")
+    idx_month = TARGET_HEADERS.index("MONTH")
+    idx_sap_rms = TARGET_HEADERS.index("SAP RMS")
+    idx_sap_rev = TARGET_HEADERS.index("SAP REV")
 
-    raise ValueError(
-        "No se pudo leer el archivo. Verifica que no esté dañado y sea .csv, .xlsx o .xls válido. "
-        f"Detalle: {' | '.join(errores)}"
-    )
+    filas_salida: List[List[Any]] = []
+    conteo_por_status: Dict[str, int] = {}
+    filas_omitidas_sin_fecha = 0
+    hojas_procesadas = []
+    hojas_ignoradas = []
 
-
-# ── Detección flexible de columnas ────────────────────────────────────────────
-
-def _find_col(df: pd.DataFrame, *candidates: str):
-    normalize = lambda s: re.sub(r"[\s_\-\.\(\)]", "", s).lower()
-    index = {normalize(c): c for c in df.columns}
-    for cand in candidates:
-        hit = index.get(normalize(cand))
-        if hit:
-            return hit
-    return None
-
-
-def _safe_series(df: pd.DataFrame, col: str) -> pd.Series:
-    s = df[col]
-    return s.iloc[:, 0] if isinstance(s, pd.DataFrame) else s
-
-
-def _eliminar_columnas_ignoradas(df: pd.DataFrame) -> pd.DataFrame:
-    normalize = lambda s: re.sub(r"[\s_\-\.\(\)]", "", str(s)).lower()
-    cols_a_quitar = [c for c in df.columns if normalize(c) in COLUMNAS_IGNORADAS]
-    if cols_a_quitar:
-        df = df.drop(columns=cols_a_quitar)
-    return df
-
-
-# ── Parseo de "End time" ──────────────────────────────────────────────────────
-# Formato esperado: 06/06/2026 09:44:14 a. m.  (también soporta p. m., AM/PM, etc.)
-
-def _normalizar_ampm(texto: str) -> str:
-    """Convierte variantes de a.m./p.m. en español a AM/PM estándar para strptime."""
-    t = texto.strip()
-    t = re.sub(r"a\.?\s*m\.?", "AM", t, flags=re.IGNORECASE)
-    t = re.sub(r"p\.?\s*m\.?", "PM", t, flags=re.IGNORECASE)
-    return t
-
-
-def _parse_end_time(series: pd.Series) -> pd.Series:
-    if pd.api.types.is_datetime64_any_dtype(series):
-        return series
-
-    s = series.astype(str).str.strip().map(_normalizar_ampm)
-
-    formatos = [
-        "%d/%m/%Y %I:%M:%S %p",
-        "%m/%d/%Y %I:%M:%S %p",
-        "%d/%m/%Y %H:%M:%S",
-        "%Y-%m-%d %H:%M:%S",
-        "%d-%m-%Y %I:%M:%S %p",
-    ]
-
-    # Intento de inferencia automática primero
-    resultado = pd.to_datetime(s, errors="coerce")
-    if resultado.notna().mean() > 0.85:
-        return resultado
-
-    for fmt in formatos:
-        try:
-            parsed = pd.to_datetime(s, format=fmt, errors="coerce")
-            if parsed.notna().mean() > 0.85:
-                return parsed
-        except Exception:
+    for sheet_name, status_val in SOURCES:
+        if not _sheet_exists(wb, sheet_name):
+            hojas_ignoradas.append(sheet_name)
             continue
 
-    return pd.to_datetime(s, errors="coerce")
+        ws = wb[sheet_name]
+        header_map = _build_header_map(ws, HEADER_ROW)
+        last_row = _find_last_row_with_data(ws, DATA_START_ROW)
 
+        if last_row < DATA_START_ROW:
+            hojas_procesadas.append({"hoja": sheet_name, "filas_leidas": 0, "filas_validas": 0})
+            continue
 
-# ── Extraer el nombre de modelo desde "Job" ───────────────────────────────────
-# El número que acompaña al modelo (ej. "182") NO debe usarse para cálculos,
-# solo se conserva el texto del modelo tal como aparece, sin alterarlo.
+        # Resuelve, para cada columna destino, cuál es la columna origen (o None si es calculada / no existe)
+        src_col_for: List[Optional[int]] = []
+        for target_name in TARGET_HEADERS:
+            key = target_name.lower()
+            if key in COMPUTED_COLS:
+                src_col_for.append(None)
+            else:
+                lookup_name = ALIAS_MAP.get(key, target_name)
+                src_col_for.append(header_map.get(lookup_name.lower()))
 
-def _limpiar_job(valor) -> str | None:
-    if pd.isna(valor):
-        return None
-    texto = str(valor).strip()
-    if texto == "" or texto.lower() == "nan":
-        return None
-    return texto
+        filas_leidas = 0
+        filas_validas = 0
 
+        for r in range(DATA_START_ROW, last_row + 1):
+            filas_leidas += 1
 
-# ── Limpieza principal ────────────────────────────────────────────────────────
+            month_col = src_col_for[idx_month]
+            month_raw = ws.cell(row=r, column=month_col).value if month_col else None
 
-def limpiar_datos(df: pd.DataFrame) -> pd.DataFrame:
+            yr, mo = _parse_year_month(month_raw)
+            if yr == 0:
+                filas_omitidas_sin_fecha += 1
+                continue
 
-    df = _eliminar_columnas_ignoradas(df)
+            # Verifica si la fila está completamente vacía en TODAS las columnas mapeadas
+            row_blank = True
+            row_values_cache: Dict[int, Any] = {}
+            for col in src_col_for:
+                if col:
+                    v = ws.cell(row=r, column=col).value
+                    row_values_cache[col] = v
+                    if v not in (None, "") and str(v).strip() != "":
+                        row_blank = False
+            if row_blank:
+                continue
 
-    # ── Job (modelo) ──────────────────────────────────────────────────────────
-    col_job = _find_col(df, "Job", "JOB", "job")
-    if col_job is None:
-        raise ValueError(
-            f"No se encontró la columna 'Job'. Columnas disponibles: {list(df.columns)}"
-        )
-    df["_job_raw"] = _safe_series(df, col_job).map(_limpiar_job)
+            sap_rms = _safe_num(
+                row_values_cache.get(src_col_for[idx_sap_rms])
+                if src_col_for[idx_sap_rms] else None
+            )
+            sap_rev = _safe_num(
+                row_values_cache.get(src_col_for[idx_sap_rev])
+                if src_col_for[idx_sap_rev] else None
+            )
+            rms_val = sap_rms * -1
+            revenue_val = sap_rev * -1
+            year_month_txt = f"{yr}-{mo:02d}"
 
-    # ── End time ──────────────────────────────────────────────────────────────
-    col_end = _find_col(df, "End time", "EndTime", "End Time", "endtime")
-    if col_end is None:
-        raise ValueError(
-            f"No se encontró la columna 'End time'. Columnas disponibles: {list(df.columns)}"
-        )
-    df["_datetime"] = _parse_end_time(_safe_series(df, col_end))
+            fila_out: List[Any] = []
+            for i, target_name in enumerate(TARGET_HEADERS):
+                key = target_name.lower()
+                if key == "month.":
+                    fila_out.append(mo)
+                elif key == "year":
+                    fila_out.append(yr)
+                elif key == "year-month":
+                    fila_out.append(year_month_txt)
+                elif key == "rms":
+                    fila_out.append(rms_val)
+                elif key == "revenue":
+                    fila_out.append(revenue_val)
+                elif key == "status":
+                    fila_out.append(status_val)
+                else:
+                    col = src_col_for[i]
+                    fila_out.append(row_values_cache.get(col, ws.cell(row=r, column=col).value) if col else None)
 
-    # Descartar filas sin fecha válida (no se puede ubicar en el tiempo)
-    df = df.dropna(subset=["_datetime"]).reset_index(drop=True)
+            filas_salida.append(fila_out)
+            filas_validas += 1
+            conteo_por_status[status_val] = conteo_por_status.get(status_val, 0) + 1
 
-    if len(df) == 0:
-        raise ValueError(
-            "No se encontraron registros con 'End time' válido. "
-            "Verifica el formato de fecha (ej: 06/06/2026 09:44:14 a. m.)."
-        )
-
-    # ── Propagar el modelo hacia adelante ────────────────────────────────────
-    # El modelo aparece una sola vez al inicio del bloque; las filas siguientes
-    # (sin valor en Job) pertenecen a ese mismo modelo.
-    df["_modelo"] = df["_job_raw"].ffill()
-
-    # Si las primeras filas no tienen modelo asignado (antes del primer Job), descartarlas
-    df = df.dropna(subset=["_modelo"]).reset_index(drop=True)
-
-    if len(df) == 0:
-        raise ValueError(
-            "No se pudo asociar ningún registro a un modelo (columna 'Job' vacía en todo el archivo)."
-        )
-
-    return df
-
-
-# ── Bloques (nuevo bloque cada vez que cambia el modelo) ──────────────────────
-
-def asignar_bloques(df: pd.DataFrame) -> pd.DataFrame:
-    cambia = df["_modelo"] != df["_modelo"].shift()
-    df["_bloque"] = cambia.cumsum()
-    return df
-
-
-# ── Cálculo de tiempo trabajado y piezas por bloque ───────────────────────────
-
-def calcular_bloques(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Para cada bloque (modelo consecutivo):
-      - piezas = número de filas del bloque SIN CONTAR la primera fila
-        (la que contiene el valor en Job). Esa primera fila es solo
-        metadata del acumulado de turnos anteriores, no una pieza
-        producida en este archivo. El conteo real inicia desde la
-        segunda fila del bloque en adelante.
-      - tiempo trabajado = última pieza del bloque ANTERIOR → última pieza de este bloque
-      - el PRIMER bloque del archivo usa las 7:00 AM del día de su última pieza
-        como punto de partida (inicio de turno), no su primera pieza.
-    """
-    bloques_ordenados = sorted(df["_bloque"].unique())
-    resultados = []
-
-    referencia_anterior = None   # datetime de la última pieza del bloque previo
-
-    for idx, bloque_id in enumerate(bloques_ordenados):
-        grupo   = df[df["_bloque"] == bloque_id]
-        modelo  = grupo["_modelo"].iloc[0]
-
-        # La primera fila del bloque (donde aparece Job) es metadata, no pieza
-        piezas  = max(len(grupo) - 1, 0)
-
-        ultima_pieza = grupo["_datetime"].max()
-
-        if idx == 0:
-            # Primer modelo del archivo → referencia = 7:00 AM del día de su última pieza
-            dia = ultima_pieza.date()
-            inicio_referencia = datetime.combine(dia, HORA_INICIO_TURNO)
-        else:
-            inicio_referencia = referencia_anterior
-
-        delta = ultima_pieza - inicio_referencia
-        segundos_trabajados = max(delta.total_seconds(), 0.0)
-
-        horas_trabajadas   = int(segundos_trabajados // 3600)
-        minutos_totales    = int(segundos_trabajados // 60)   # total convertido a minutos
-
-        resultados.append({
-            "Modelo":             modelo,
-            "_bloque_id":         bloque_id,
-            "_inicio_referencia": inicio_referencia,
-            "_fin_bloque":        ultima_pieza,
-            "Horas Trabajadas":   horas_trabajadas,
-            "Minutos Trabajados": minutos_totales,
-            "Piezas":             piezas,
-            "_horas_decimal":     round(segundos_trabajados / 3600, 4),
+        hojas_procesadas.append({
+            "hoja": sheet_name,
+            "filas_leidas": filas_leidas,
+            "filas_validas": filas_validas,
         })
 
-        referencia_anterior = ultima_pieza
+    wb.close()
 
-    return pd.DataFrame(resultados)
+    # Ordena por "Year-Month" ascendente (texto "AAAA-MM" ordena igual que cronológicamente)
+    idx_year_month = TARGET_HEADERS.index("Year-Month")
+    filas_salida.sort(key=lambda row: row[idx_year_month] or "")
 
+    # Genera el archivo de salida 
+    wb_out = Workbook()
+    ws_out = wb_out.active
+    ws_out.title = SHEET_OUT
 
-# ── Consolidar por modelo (si el mismo modelo se repite en varios bloques) ────
+    ws_out.append(TARGET_HEADERS)
+    for row in filas_salida:
+        ws_out.append(row)
 
-def consolidar_reporte(bloques: pd.DataFrame) -> pd.DataFrame:
-    """
-    Si un modelo aparece en más de un bloque no consecutivo (vuelve a
-    correr después de otro modelo), se suman sus piezas y tiempo trabajado.
-    """
-    reporte = (
-        bloques
-        .groupby("Modelo", as_index=False)
-        .agg(
-            **{
-                "_horas_decimal_sum": ("_horas_decimal", "sum"),
-                "Piezas":             ("Piezas", "sum"),
-                "_corridas":          ("_bloque_id", "count"),
-            }
-        )
-    )
+    # Encabezado en negrita + autofiltro + freeze panes (igual que la macro)
+    for cell in ws_out[1]:
+        cell.font = cell.font.copy(bold=True)
+    last_col_letter = get_column_letter(len(TARGET_HEADERS))
+    ws_out.auto_filter.ref = f"A1:{last_col_letter}{len(filas_salida) + 1}"
+    ws_out.freeze_panes = "A2"
 
-    # Horas Trabajadas = parte entera de horas; Minutos Trabajados = TOTAL en minutos
-    reporte["Horas Trabajadas"]   = reporte["_horas_decimal_sum"].astype(int)
-    reporte["Minutos Trabajados"] = (reporte["_horas_decimal_sum"] * 60).round().astype(int)
-    reporte = reporte.drop(columns=["_horas_decimal_sum"])
+    # Ajuste rapido de ancho de columnas
+    for i, header in enumerate(TARGET_HEADERS, start=1):
+        ws_out.column_dimensions[get_column_letter(i)].width = min(max(len(header) + 2, 10), 32)
 
-    # Mantener el orden de primera aparición del modelo en el archivo original
-    orden = bloques.drop_duplicates("Modelo")["Modelo"].tolist()
-    reporte["_orden"] = reporte["Modelo"].map({m: i for i, m in enumerate(orden)})
-    reporte = reporte.sort_values("_orden").drop(columns=["_orden", "_corridas"]).reset_index(drop=True)
+    buffer = io.BytesIO()
+    wb_out.save(buffer)
+    excel_bytes = buffer.getvalue()
 
-    return reporte[["Modelo", "Horas Trabajadas", "Minutos Trabajados", "Piezas"]]
-
-
-# ── Exportar Excel de salida (solo 4 columnas requeridas) ─────────────────────
-
-def exportar_excel(reporte: pd.DataFrame) -> bytes:
-    output = io.BytesIO()
-
-    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        wb = writer.book
-
-        fmt_header = wb.add_format({
-            "bold": True, "bg_color": "#185FA5", "font_color": "#FFFFFF",
-            "border": 1, "align": "center", "valign": "vcenter",
-            "font_name": "Arial", "font_size": 10,
-        })
-        fmt_cell = wb.add_format({"font_name": "Arial", "font_size": 10, "align": "center", "valign": "vcenter"})
-        fmt_num  = wb.add_format({"num_format": "#,##0", "font_name": "Arial", "font_size": 10, "align": "center", "valign": "vcenter"})
-
-        columnas = [
-            ("Modelo",             "Modelo",             32, fmt_cell),
-            ("Horas Trabajadas",   "Horas Trabajadas",   16, fmt_num),
-            ("Minutos Trabajados", "Minutos Trabajados", 18, fmt_num),
-            ("Piezas",             "Piezas",             12, fmt_num),
-        ]
-
-        reporte.to_excel(writer, sheet_name="Resultado", index=False, startrow=0, header=False)
-        ws = writer.sheets["Resultado"]
-
-        # Encabezado con más alto para que las flechas del filtro no encimen los datos
-        ws.set_row(0, 22)
-
-        for i, (key, header, width, fmt) in enumerate(columnas):
-            ws.write(0, i, header, fmt_header)
-            ws.set_column(i, i, width)
-
-        # Datos empiezan justo después del encabezado (fila 1 en adelante)
-        for r in range(len(reporte)):
-            for i, (key, _, _, fmt) in enumerate(columnas):
-                ws.write(r + 1, i, reporte.iloc[r][key], fmt)
-
-        ws.freeze_panes(1, 0)
-        ws.autofilter(0, 0, len(reporte), len(columnas) - 1)
-
-    return output.getvalue()
-
-
-# ── Entrada pública ───────────────────────────────────────────────────────────
-
-def procesar_archivo(file_bytes: bytes, filename: str) -> dict:
-    df      = leer_archivo(file_bytes, filename)
-    df      = limpiar_datos(df)
-    df      = asignar_bloques(df)
-    bloques = calcular_bloques(df)
-    reporte = consolidar_reporte(bloques)
-
-    excel_out = exportar_excel(reporte)
-
+    #  Resumen para la UI 
+    year_months = sorted({row[idx_year_month] for row in filas_salida if row[idx_year_month]})
     resumen = {
-        "total_registros":   len(df),
-        "total_modelos":     int(reporte["Modelo"].nunique()),
-        "total_piezas":      int(reporte["Piezas"].sum()),
-        "horas_trabajadas":  int(reporte["Horas Trabajadas"].sum()),
-        "rango_fechas": sorted({
-            str(d.date()) for d in [df["_datetime"].min(), df["_datetime"].max()]
-        }),
+        "filas_totales": len(filas_salida),
+        "columnas": len(TARGET_HEADERS),
+        "por_status": conteo_por_status,
+        "hojas_encontradas": hojas_encontradas,
+        "hojas_ignoradas": hojas_ignoradas,
+        "hojas_detalle": hojas_procesadas,
+        "filas_omitidas_sin_fecha": filas_omitidas_sin_fecha,
+        "rango_year_month": {
+            "desde": year_months[0] if year_months else None,
+            "hasta": year_months[-1] if year_months else None,
+        },
+        "hoja_salida": SHEET_OUT,
     }
 
-    return {
-        "reporte":   reporte,
-        "excel_out": excel_out,
-        "resumen":   resumen,
-    }
-
-
-# Mantener compatibilidad con el nombre anterior usado por app.py
-def procesar_excel(file_bytes: bytes, filename: str = "archivo.xlsx") -> dict:
-    return procesar_archivo(file_bytes, filename)
+    return {"resumen": resumen, "excel_out": excel_bytes}

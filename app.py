@@ -1,13 +1,14 @@
 from flask import Flask, request, jsonify, send_file, send_from_directory
 from flask_cors import CORS
 import io, os, traceback
+
 from excel_parser import procesar_archivo
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
 CORS(app)
 
-ACCESS_KEY = os.environ.get("ACCESS_KEY", "smt2024")
-EXTENSIONES_PERMITIDAS = (".csv", ".xlsx", ".xls")
+ACCESS_KEY = os.environ.get("ACCESS_KEY", "silver2024")
+EXTENSIONES_PERMITIDAS = (".xlsx", ".xls", ".xlsm")
 
 
 @app.route("/")
@@ -15,7 +16,7 @@ def index():
     return send_from_directory(".", "index.html")
 
 
-# ── Verificar clave (solo valida, no procesa nada) ────────────────────────────
+# ── Verificar clave (solo valida, no procesa nada) ──────────────────────────
 @app.route("/verificar-clave", methods=["POST"])
 def verificar_clave():
     key = request.form.get("key", "")
@@ -24,7 +25,7 @@ def verificar_clave():
     return jsonify({"ok": True})
 
 
-# ── Procesar archivo (csv, xlsx, xls) ─────────────────────────────────────────
+# ── Procesar archivo (limpieza Silver) ──────────────────────────────────────
 @app.route("/procesar", methods=["POST"])
 def procesar():
     key = request.form.get("key", "")
@@ -35,20 +36,21 @@ def procesar():
         return jsonify({"error": "No se recibió ningún archivo"}), 400
 
     archivo = request.files["file"]
-    nombre  = archivo.filename or ""
+    nombre = archivo.filename or ""
     if not nombre:
         return jsonify({"error": "Nombre de archivo vacío"}), 400
+
     if not nombre.lower().endswith(EXTENSIONES_PERMITIDAS):
-        return jsonify({"error": "Solo se aceptan archivos .csv, .xlsx o .xls"}), 400
+        return jsonify({"error": "Solo se aceptan archivos .xlsx, .xls o .xlsm"}), 400
 
     try:
         contenido = archivo.read()
         resultado = procesar_archivo(contenido, nombre)
-        resumen   = resultado["resumen"]
+        resumen = resultado["resumen"]
 
         nombre_base = nombre.rsplit(".", 1)[0]
-        app.config["_ultimo_excel"]  = resultado["excel_out"]
-        app.config["_ultimo_nombre"] = f"{nombre_base}_analisis.xlsx"
+        app.config["_ultimo_excel"] = resultado["excel_out"]
+        app.config["_ultimo_nombre"] = f"{nombre_base}_SilverV2.xlsx"
 
         return jsonify({"ok": True, "resumen": resumen})
 
@@ -57,15 +59,17 @@ def procesar():
     except Exception:
         traceback.print_exc()
         return jsonify({
-            "error": "Error inesperado al procesar el archivo. Verifica el formato y las columnas requeridas (Job, End time)."
+            "error": ("Error inesperado al procesar el archivo. Verifica que las hojas "
+                      "\"GR'S\", \"GRS (RM)\" y \"SQ00\" existan y que los encabezados "
+                      "estén en la fila 2.")
         }), 500
 
 
-# ── Descargar reporte ─────────────────────────────────────────────────────────
+# ── Descargar reporte SilverV2 ───────────────────────────────────────────────
 @app.route("/descargar")
 def descargar():
-    excel  = app.config.get("_ultimo_excel")
-    nombre = app.config.get("_ultimo_nombre", "reporte_analisis.xlsx")
+    excel = app.config.get("_ultimo_excel")
+    nombre = app.config.get("_ultimo_nombre", "SilverV2.xlsx")
     if not excel:
         return jsonify({"error": "No hay reporte disponible. Procesa un archivo primero."}), 404
     return send_file(

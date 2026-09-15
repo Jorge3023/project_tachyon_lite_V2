@@ -1,10 +1,10 @@
 <!DOCTYPE html>
 <html lang="es">
 <head>
-  <meta charset="UTF-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Project Tachyon Lite</title>
-  <link rel="stylesheet" href="/static/style.css"/>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Silver Builder</title>
+<link rel="stylesheet" href="/static/style.css"/>
 </head>
 <body>
 
@@ -14,23 +14,23 @@
     <div class="login-logo">
       <svg width="22" height="22" fill="none" viewBox="0 0 24 24" stroke="currentColor">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-          d="M13 10V3L4 14h7v7l9-11h-7z"/>
+              d="M13 10V3L4 14h7v7l9-11h-7z"/>
       </svg>
     </div>
-    <div class="login-title">Project Tachyon Lite</div>
+    <div class="login-title">Silver Builder</div>
     <div class="login-sub">Ingresa la clave de acceso para continuar</div>
 
     <label class="field-label" for="accessKey">Clave de acceso</label>
     <div class="input-wrap">
       <input type="password" id="accessKey" class="input"
-        placeholder="••••••••" autocomplete="current-password"
-        onkeydown="if(event.key==='Enter') doLogin()"/>
+             placeholder="••••••••" autocomplete="current-password"
+             onkeydown="if(event.key==='Enter') doLogin()"/>
       <button class="input-eye" onclick="toggleKey()" title="Mostrar/ocultar clave">
         <svg id="eyeIcon" width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-            d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+                d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-            d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/>
+                d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/>
         </svg>
       </button>
     </div>
@@ -51,12 +51,11 @@
   <div class="topbar-logo">
     <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor">
       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-        d="M13 10V3L4 14h7v7l9-11h-7z"/>
+            d="M13 10V3L4 14h7v7l9-11h-7z"/>
     </svg>
   </div>
-  <span class="topbar-title">Project Tachyon</span>
-  <span class="topbar-badge">LITE</span>
-
+  <span class="topbar-title">Silver Builder</span>
+  <span class="topbar-badge">SilverV2</span>
   <div class="session-badge" id="sessionBadge" style="display:none">
     <span class="session-dot"></span>
     <span id="sessionTimer">—</span>
@@ -69,25 +68,28 @@
 
   <!-- Card upload -->
   <div class="card" id="cardUpload">
-    <div class="card-title">Analizar reporte de producción</div>
-    <div class="card-sub">Sube el archivo crudo — descarga el análisis por modelo al instante</div>
+    <div class="card-title">Generar hoja SilverV2</div>
+    <div class="card-sub">
+      Sube el Excel crudo (debe contener las hojas <b>GR'S</b>, <b>GRS (RM)</b> y/o <b>SQ00</b>,
+      con encabezados en la fila 2) — descarga el archivo limpio al instante
+    </div>
 
     <div class="dropzone" id="dropzone">
-      <input type="file" id="fileInput" accept=".csv,.xlsx,.xls" onchange="onFileChange(event)"/>
+      <input type="file" id="fileInput" accept=".xlsx,.xls,.xlsm" onchange="onFileChange(event)"/>
       <div class="dz-icon">
         <svg width="24" height="24" fill="none" viewBox="0 0 24 24" stroke="currentColor">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
-            d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/>
+                d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/>
         </svg>
       </div>
       <div class="dz-title">Haz clic o arrastra tu archivo aquí</div>
-      <div class="dz-sub">Formatos aceptados: .csv &nbsp;·&nbsp; .xlsx &nbsp;·&nbsp; .xls</div>
+      <div class="dz-sub">Formatos aceptados: .xlsx &nbsp;·&nbsp; .xlsm &nbsp;·&nbsp; .xls</div>
     </div>
 
     <div class="file-selected" id="fileSelected">
       <svg class="file-icon" width="20" height="20" fill="none" viewBox="0 0 24 24" stroke="currentColor">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-          d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+              d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
       </svg>
       <span class="file-name" id="fileName">—</span>
       <button class="file-remove" onclick="quitarArchivo()" title="Quitar">×</button>
@@ -96,7 +98,7 @@
     <div class="alert" id="alerta">
       <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-          d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+              d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
       </svg>
       <span id="alertaMsg"></span>
     </div>
@@ -110,29 +112,33 @@
   <!-- Card resultado -->
   <div class="card" id="resultado">
     <div class="card-title">
-      ✓ Análisis completado
+      ✓ SilverV2 generado
       <span id="resNombre" style="font-weight:400; color:var(--gray-500); margin-left:6px"></span>
     </div>
 
     <div class="metrics" style="margin-top:16px">
       <div class="metric">
-        <div class="metric-val" id="mRegistros">—</div>
-        <div class="metric-lab">Registros totales</div>
+        <div class="metric-val" id="mFilas">—</div>
+        <div class="metric-lab">Filas consolidadas</div>
       </div>
       <div class="metric blue">
-        <div class="metric-val" id="mModelos">—</div>
-        <div class="metric-lab">Modelos detectados</div>
+        <div class="metric-val" id="mColumnas">—</div>
+        <div class="metric-lab">Columnas</div>
       </div>
       <div class="metric green">
-        <div class="metric-val" id="mPiezas">—</div>
-        <div class="metric-lab">Piezas totales</div>
+        <div class="metric-val" id="mHojas">—</div>
+        <div class="metric-lab">Hojas encontradas</div>
       </div>
     </div>
 
-    <div class="metrics" style="grid-template-columns: 1fr;">
+    <div class="metrics" style="grid-template-columns: 1fr 1fr;">
       <div class="metric amber">
-        <div class="metric-val" id="mHoras">—</div>
-        <div class="metric-lab">Horas trabajadas (total)</div>
+        <div class="metric-val" id="mRango">—</div>
+        <div class="metric-lab">Rango Year-Month</div>
+      </div>
+      <div class="metric">
+        <div class="metric-val" id="mOmitidas">—</div>
+        <div class="metric-lab">Filas omitidas (sin fecha)</div>
       </div>
     </div>
 
@@ -141,17 +147,17 @@
     <button class="btn-download" onclick="descargar()">
       <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-          d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+              d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
       </svg>
-      Descargar Excel con análisis completo
+      Descargar Excel con hoja SilverV2
     </button>
-    <button class="btn-nuevo" onclick="nuevo()">Analizar otro archivo</button>
+    <button class="btn-nuevo" onclick="nuevo()">Procesar otro archivo</button>
   </div>
 
 </div>
 
 <div class="footer">
-  Project Tachyon Lite &nbsp;·&nbsp; Los archivos no se almacenan en ningún servidor
+  Silver Builder &nbsp;·&nbsp; Los archivos no se almacenan en ningún servidor
 </div>
 
 <script src="/static/app.js"></script>
