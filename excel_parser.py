@@ -7,9 +7,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from openpyxl import load_workbook, Workbook
 from openpyxl.utils import get_column_letter
+from openpyxl.styles import PatternFill
 
 # 
-#  CONFIGURACION (equivalente a las constantes de la macro)
+#  CONFIGURACION
 # 
 
 SHEET_GRS = "GR'S"
@@ -275,6 +276,38 @@ def procesar_archivo(contenido: bytes, nombre: str) -> Dict[str, Any]:
     # Ajuste rapido de ancho de columnas
     for i, header in enumerate(TARGET_HEADERS, start=1):
         ws_out.column_dimensions[get_column_letter(i)].width = min(max(len(header) + 2, 10), 32)
+
+    last_col_letter = get_column_letter(len(TARGET_HEADERS))
+    ws_out.auto_filter.ref = f"A1:{last_col_letter}{len(filas_salida) + 1}"
+    ws_out.freeze_panes = "A2"
+
+    # Ajuste rapido de ancho de columnas
+    for i, header in enumerate(TARGET_HEADERS, start=1):
+        ws_out.column_dimensions[get_column_letter(i)].width = min(max(len(header) + 2, 10), 32)
+
+    # ---> INICIO DEL NUEVO CÓDIGO DE COLORES <---
+    # 1. Definimos los colores (Puedes cambiar los códigos Hexadecimales si prefieres otros tonos)
+    color_verde = PatternFill(start_color="D9EAD3", end_color="D9EAD3", fill_type="solid")    # Verde pastel para GR
+    color_amarillo = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid") # Amarillo pastel para OPO
+
+    # 2. Encontramos en qué número de columna está "Status" (+1 porque openpyxl cuenta desde 1)
+    col_status_idx = TARGET_HEADERS.index("Status") + 1
+
+    # 3. Recorremos todas las filas (desde la fila 2 para saltar el encabezado)
+    for row_idx in range(2, ws_out.max_row + 1):
+        celda_status = ws_out.cell(row=row_idx, column=col_status_idx)
+        
+        if celda_status.value == "GR":
+            celda_status.fill = color_verde
+        elif celda_status.value == "OPO":
+            celda_status.fill = color_amarillo
+
+    # ---> FIN DEL CÓDIGO PARA DAR COLORES A GR Y OPO <---
+
+    # Guardado del archivo
+    buffer = io.BytesIO()
+    wb_out.save(buffer)
+    excel_bytes = buffer.getvalue()
 
     buffer = io.BytesIO()
     wb_out.save(buffer)
