@@ -116,28 +116,18 @@ def _sheet_exists(wb, name: str) -> bool:
 
 
 def _build_header_map(ws, header_row: int) -> Dict[str, int]:
+    """Mapa nombre de columna (case-insensitive) -> índice de columna (0-indexado para iter_rows)."""
     header_map: Dict[str, int] = {}
-    # Leemos solo la fila de encabezados
+    # Leemos de forma eficiente solo la fila que contiene los encabezados
     for row in ws.iter_rows(min_row=header_row, max_row=header_row, values_only=True):
         for idx, val in enumerate(row):
             name = _norm(val)
             if name:
                 key = name.lower()
                 if key not in header_map:
-                    header_map[key] = idx # Guardamos el índice (0, 1, 2...)
-        break # Solo necesitamos la primera fila
+                    header_map[key] = idx
+        break  # Solo evaluamos la primera fila retornada (que es header_row)
     return header_map
-
-
-def _find_last_row_with_data(ws, data_start_row: int) -> int:
-    """Última fila con al menos un dato, buscando desde abajo hacia arriba (más
-    robusto que solo mirar la columna A, por si esa columna viene vacía)."""
-    max_row = ws.max_row or (data_start_row - 1)
-    for r in range(max_row, data_start_row - 1, -1):
-        for c in range(1, (ws.max_column or 1) + 1):
-            if ws.cell(row=r, column=c).value not in (None, ""):
-                return r
-    return data_start_row - 1  # sin datos
 
 
 # 
@@ -151,8 +141,6 @@ def procesar_archivo(contenido: bytes, nombre: str) -> Dict[str, Any]:
           "resumen": {...},       # métricas para mostrar en la UI
           "excel_out": bytes,     # archivo .xlsx final (hoja SilverV2)
         }
-    Lanza ValueError con un mensaje claro si no se encuentra NINGUNA de las
-    hojas esperadas.
     """
     if not nombre.lower().endswith((".xlsx", ".xls", ".xlsm")):
         raise ValueError(
@@ -189,13 +177,8 @@ def procesar_archivo(contenido: bytes, nombre: str) -> Dict[str, Any]:
 
         ws = wb[sheet_name]
         header_map = _build_header_map(ws, HEADER_ROW)
-        last_row = _find_last_row_with_data(ws, DATA_START_ROW)
 
-        if last_row < DATA_START_ROW:
-            hojas_procesadas.append({"hoja": sheet_name, "filas_leidas": 0, "filas_validas": 0})
-            continue
-
-        # Resuelve, para cada columna destino, cuál es la columna origen (o None si es calculada / no existe)
+        # Resuelve, para cada columna destino, el índice de la columna origen (o None si es calculada / no existe)
         src_col_for: List[Optional[int]] = []
         for target_name in TARGET_HEADERS:
             key = target_name.lower()
@@ -204,15 +187,15 @@ def procesar_archivo(contenido: bytes, nombre: str) -> Dict[str, Any]:
             else:
                 lookup_name = ALIAS_MAP.get(key, target_name)
                 src_col_for.append(header_map.get(lookup_name.lower()))
-        
+
         filas_leidas = 0
         filas_validas = 0
 
-        # En lugar de iterar por rango numérico, iteramos secuencialmente obteniendo las tuplas
+        # Iteramos las filas de forma secuencial y ultra rápida (values_only=True)
         for row_values in ws.iter_rows(min_row=DATA_START_ROW, values_only=True):
             filas_leidas += 1
 
-            # Si toda la fila está vacía (equivalente a tu revisión anterior o al final del archivo)
+            # Validar si toda la fila extraída viene vacía (final del archivo o fila en blanco)
             if all(v in (None, "") for v in row_values):
                 continue
 
@@ -224,10 +207,10 @@ def procesar_archivo(contenido: bytes, nombre: str) -> Dict[str, Any]:
                 filas_omitidas_sin_fecha += 1
                 continue
 
-            # Extraemos SAP RMS y SAP REV usando los índices
+            # Obtenemos los valores de SAP para calcular los reversos
             idx_rms_src = src_col_for[idx_sap_rms]
             idx_rev_src = src_col_for[idx_sap_rev]
-            
+
             sap_rms = _safe_num(row_values[idx_rms_src] if idx_rms_src is not None and idx_rms_src < len(row_values) else None)
             sap_rev = _safe_num(row_values[idx_rev_src] if idx_rev_src is not None and idx_rev_src < len(row_values) else None)
             
@@ -252,10 +235,8 @@ def procesar_archivo(contenido: bytes, nombre: str) -> Dict[str, Any]:
                     fila_out.append(status_val)
                 else:
                     col_idx = src_col_for[i]
-                    # Validamos que el índice exista y no supere la longitud de la fila devuelta
                     if col_idx is not None and col_idx < len(row_values):
-                        val = row_values[col_idx]
-                        fila_out.append(val)
+                        fila_out.append(row_values[col_idx])
                     else:
                         fila_out.append(None)
 
@@ -271,7 +252,7 @@ def procesar_archivo(contenido: bytes, nombre: str) -> Dict[str, Any]:
 
     wb.close()
 
-    # Ordena por "Year-Month" ascendente (texto "AAAA-MM" ordena igual que cronológicamente)
+    # Ordena por "Year-Month" ascendente
     idx_year_month = TARGET_HEADERS.index("Year-Month")
     filas_salida.sort(key=lambda row: row[idx_year_month] or "")
 
@@ -284,7 +265,7 @@ def procesar_archivo(contenido: bytes, nombre: str) -> Dict[str, Any]:
     for row in filas_salida:
         ws_out.append(row)
 
-    # Encabezado en negrita + autofiltro + freeze panes (igual que la macro)
+    # Encabezado en negrita + autofiltro + freeze panes
     for cell in ws_out[1]:
         cell.font = cell.font.copy(bold=True)
     last_col_letter = get_column_letter(len(TARGET_HEADERS))
